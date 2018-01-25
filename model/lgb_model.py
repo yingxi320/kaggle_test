@@ -48,6 +48,27 @@ for df in ['ar', 'hr']:
     data[df]['visit_datetime'] = data[df]['visit_datetime'].dt.date
     data[df]['reserve_datetime'] = pd.to_datetime(data[df]['reserve_datetime'])
     data[df]['reserve_datetime'] = data[df]['reserve_datetime'].dt.date
+
+    data[df]['hour_gap'] = data[df]['visit_datetime'].sub(data[df]['reserve_datetime'])
+    data[df]['hour_gap'] = data[df]['hour_gap'].apply(lambda x: x / np.timedelta64(1, 'h'))
+    # separate reservation into 5 categories based on gap lenght
+    data[df]['reserve_-12_h'] = np.where(data[df]['hour_gap'] <= 12,
+                                        data[df]['reserve_visitors'], 0)
+    data[df]['reserve_12_37_h'] = np.where((data[df]['hour_gap'] <= 37) & (data[df]['hour_gap'] > 12),
+                                          data[df]['reserve_visitors'], 0)
+    data[df]['reserve_37_59_h'] = np.where((data[df]['hour_gap'] <= 59) & (data[df]['hour_gap'] > 37),
+                                          data[df]['reserve_visitors'], 0)
+    data[df]['reserve_59_85_h'] = np.where((data[df]['hour_gap'] <= 85) & (data[df]['hour_gap'] > 59),
+                                          data[df]['reserve_visitors'], 0)
+    data[df]['reserve_85+_h'] = np.where((data[df]['hour_gap'] > 85),
+                                        data[df]['reserve_visitors'], 0)
+    # group by air_store_id and visit_date to enable joining with main table
+    group_list = ['air_store_id', 'visit_datetime', 'reserve_visitors', 'reserve_-12_h',
+                  'reserve_12_37_h', 'reserve_37_59_h', 'reserve_59_85_h', 'reserve_85+_h']
+    reserve = data[df][group_list].groupby(['air_store_id', 'visit_datetime'], as_index=False).sum().rename(
+        columns={'visit_datetime': 'visit_date'}
+    )
+
     data[df]['reserve_datetime_diff'] = data[df].apply(lambda r: (r['visit_datetime'] - r['reserve_datetime']).days,
                                                        axis=1)
     tmp1 = data[df].groupby(['air_store_id', 'visit_datetime'], as_index=False)[
@@ -64,7 +85,9 @@ for df in ['ar', 'hr']:
     data[df] = pd.merge(tmp1, tmp2, how='inner', on=['air_store_id', 'visit_date'])
 
     data[df] = pd.merge(data[df], tmp3, on=['air_store_id', 'visit_date'], how='left')
-    del tmp1; del tmp2; del tmp3
+    data[df] = pd.merge(data[df], reserve, on=['air_store_id', 'visit_date'], how='left')
+
+    del tmp1; del tmp2; del tmp3; del reserve
 
 data['tra']['visit_date'] = pd.to_datetime(data['tra']['visit_date'])
 data['tra']['dow'] = data['tra']['visit_date'].dt.dayofweek
@@ -208,12 +231,13 @@ for train_index, test_index in kf.split(X):
         feature_name=col,evals_result=evals_result,
         valid_sets=[dtrain, dval], early_stopping_rounds=50, verbose_eval=50
     )
+
     # print('Plot metrics during training...')
     # ax = lgb.plot_metric(evals_result, metric='rmse')
     # plt.show()
     #
     # print('Plot feature importances...')
-    # ax = lgb.plot_importance(bst, max_num_features=)
+    # ax = lgb.plot_importance(bst, max_num_features=50)
     # plt.show()
 
     err_tr = RMSLE(y_tr, bst.predict(X_tr, num_iteration=bst.best_iteration or MAX_ROUNDS))
@@ -223,10 +247,10 @@ for train_index, test_index in kf.split(X):
     train_errors.append(err_tr)
     valid_errors.append(err_te)
     preds = bst.predict(test[col], num_iteration=bst.best_iteration or MAX_ROUNDS)
-    test['preds'] += preds
+    test['visitors'] += preds
 print('Train RMSE mean: ', np.mean(train_errors))
 print('Valid RMSE mean: ', np.mean(valid_errors))
-test['preds'] /= 10
+test['visitors'] /= 10
 #print('Validate RMSE: ', RMSLE(np.log1p(test['visitors'].values), test['preds']))
 test['visitors'] = np.expm1(test['visitors']).clip(lower=0.)
 sub1 = test[['id', 'visitors']].copy()
