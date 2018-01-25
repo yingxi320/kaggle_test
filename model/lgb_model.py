@@ -20,11 +20,12 @@ from datetime import datetime
 from xgboost import XGBRegressor
 from sklearn.cluster import KMeans
 import lightgbm as lgb
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import KFold
 
 data = {
-    'tra': pd.read_csv('../data/air_visit_data.csv'),
+    'tra': pd.read_csv('../data/air_visit_data_new.csv'),
     'as': pd.read_csv('../data/air_store_info.csv'),
     'hs': pd.read_csv('../data/hpg_store_info.csv'),
     'ar': pd.read_csv('../data/air_reserve.csv'),
@@ -55,19 +56,32 @@ for df in ['ar', 'hr']:
     tmp2 = data[df].groupby(['air_store_id', 'visit_datetime'], as_index=False)[
         ['reserve_datetime_diff', 'reserve_visitors']].mean().rename(
         columns={'visit_datetime': 'visit_date', 'reserve_datetime_diff': 'rs2', 'reserve_visitors': 'rv2'})
+
+    tmp3 = data[df].groupby(['air_store_id', 'visit_datetime'], as_index=False).count()[
+        ['air_store_id', 'visit_datetime', 'reserve_datetime']].rename(
+        columns={'visit_datetime': 'visit_date', 'reserve_datetime': 'visit_counts'})
+
     data[df] = pd.merge(tmp1, tmp2, how='inner', on=['air_store_id', 'visit_date'])
+
+    data[df] = pd.merge(data[df], tmp3, on=['air_store_id', 'visit_date'], how='left')
+    del tmp1; del tmp2; del tmp3
 
 data['tra']['visit_date'] = pd.to_datetime(data['tra']['visit_date'])
 data['tra']['dow'] = data['tra']['visit_date'].dt.dayofweek
-data['tra']['year'] = data['tra']['visit_date'].dt.year
 data['tra']['month'] = data['tra']['visit_date'].dt.month
 data['tra']['visit_date'] = data['tra']['visit_date'].dt.date
+
+###############################################
+# start_date
+start_date = data['tra'].groupby(['air_store_id'])['visit_date'].min()
+start_date = start_date.reset_index().rename(columns={'visit_date': 'start_date'})
+start_date['start_date'] = start_date['start_date']
+################################################
 
 data['tes']['visit_date'] = data['tes']['id'].map(lambda x: str(x).split('_')[2])
 data['tes']['air_store_id'] = data['tes']['id'].map(lambda x: '_'.join(x.split('_')[:2]))
 data['tes']['visit_date'] = pd.to_datetime(data['tes']['visit_date'])
 data['tes']['dow'] = data['tes']['visit_date'].dt.dayofweek
-data['tes']['year'] = data['tes']['visit_date'].dt.year
 data['tes']['month'] = data['tes']['visit_date'].dt.month
 data['tes']['visit_date'] = data['tes']['visit_date'].dt.date
 
@@ -114,10 +128,16 @@ train['set'] = 0
 test['set'] = 1
 train_test = pd.concat([train, test], axis=0)
 
+store_with_no_visit_rate = pd.read_csv('../data/store_with_no_visitor_rate.csv')
+train_test = pd.merge(train_test, store_with_no_visit_rate, on='air_store_id', how='left')
+del store_with_no_visit_rate
+
 train_test['total_reserv_sum'] = train_test['rv1_x'] + train_test['rv1_y']
 train_test['total_reserv_mean'] = (train_test['rv2_x'] + train_test['rv2_y']) / 2
 train_test['total_reserv_dt_diff_mean'] = (train_test['rs2_x'] + train_test['rs2_y']) / 2
 
+train_test = pd.merge(train_test, start_date, on='air_store_id', how='left')
+train_test['days_from_start_date'] = train_test.apply(lambda x: (x['visit_date'] - x['start_date']).days, axis=1)
 # NEW FEATURES FROM JMBULL
 train_test['date_int'] = train_test['visit_date'].apply(lambda x: x.strftime('%Y%m%d')).astype(int)
 train_test['var_max_lat'] = train_test['latitude'].max() - train_test['latitude']
@@ -135,7 +155,7 @@ test = train_test[train_test['set'] == 1]
 train.drop('set', axis=1, inplace=True)
 test.drop('set', axis=1, inplace=True)
 
-col = [c for c in train.columns if c not in ['id', 'air_store_id', 'visit_date', 'visitors', 'day_of_week']]
+col = [c for c in train.columns if c not in ['id', 'air_store_id', 'visit_date', 'visitors', 'start_date', 'day_of_week']]
 print(col)
 train = train.fillna(-1)
 test = test.fillna(-1)
@@ -157,16 +177,20 @@ params = {
     'metric': 'rmse',
     'num_threads': 16
 }
-from datetime import date
-dd = date(2017, 3, 16)
-validate = train[train['visit_date'] >= dd]
-train_set = train[train['visit_date'] < dd]
+
+from sklearn.model_selection import GridSearchCV
+
+
+# from datetime import date
+# dd = date(2017, 3, 16)
+# validate = train[train['visit_date'] >= dd]
+# train_set = train[train['visit_date'] < dd]
 kf = KFold(n_splits=10)
-validate['preds'] = 0
+test['visitors'] = 0
 print('starting training lgb model')
 MAX_ROUNDS = 8000
-X = train_set[col].values
-y = np.log1p(train_set['visitors'].values)
+X = train[col].values
+y = np.log1p(train['visitors'].values)
 train_errors = []
 valid_errors = []
 idx = 1
@@ -176,26 +200,36 @@ for train_index, test_index in kf.split(X):
     idx += 1
     X_tr, X_te = X[train_index], X[test_index]
     y_tr, y_te = y[train_index], y[test_index]
+    evals_result = {}  # to record eval results for plotting
     dtrain = lgb.Dataset(X_tr, y_tr)
     dval = lgb.Dataset(X_te, y_te)
     bst = lgb.train(
         params, dtrain, num_boost_round=MAX_ROUNDS,
+        feature_name=col,evals_result=evals_result,
         valid_sets=[dtrain, dval], early_stopping_rounds=50, verbose_eval=50
     )
+    # print('Plot metrics during training...')
+    # ax = lgb.plot_metric(evals_result, metric='rmse')
+    # plt.show()
+    #
+    # print('Plot feature importances...')
+    # ax = lgb.plot_importance(bst, max_num_features=)
+    # plt.show()
+
     err_tr = RMSLE(y_tr, bst.predict(X_tr, num_iteration=bst.best_iteration or MAX_ROUNDS))
     err_te = RMSLE(y_te, bst.predict(X_te, num_iteration=bst.best_iteration or MAX_ROUNDS))
     print('RMSE train: ', err_tr)
     print('RMSE validate: ', err_te)
     train_errors.append(err_tr)
     valid_errors.append(err_te)
-    preds = bst.predict(validate[col], num_iteration=bst.best_iteration or MAX_ROUNDS)
-    validate['preds'] += preds
+    preds = bst.predict(test[col], num_iteration=bst.best_iteration or MAX_ROUNDS)
+    test['preds'] += preds
 print('Train RMSE mean: ', np.mean(train_errors))
 print('Valid RMSE mean: ', np.mean(valid_errors))
-validate['preds'] /= 10
-validate['preds'] = np.expm1(validate['preds']).clip(lower=0.)
-print('Validate RMSE: ', RMSLE(np.log1p(validate['visitors'].values), validate['preds']))
-#sub1 = test[['id', 'visitors']].copy()
+test['preds'] /= 10
+#print('Validate RMSE: ', RMSLE(np.log1p(test['visitors'].values), test['preds']))
+test['visitors'] = np.expm1(test['visitors']).clip(lower=0.)
+sub1 = test[['id', 'visitors']].copy()
 del train;
 del data;
 
@@ -241,7 +275,7 @@ sub2 = sample_submission[['id', 'visitors']].copy()
 sub_merge = pd.merge(sub1, sub2, on='id', how='inner')
 
 sub_merge['visitors'] = 0.7 * sub_merge['visitors_x'] + 0.3 * sub_merge['visitors_y'] * 1.1
-sub_merge[['id', 'visitors']].to_csv('submission.csv', index=False)
+sub_merge[['id', 'visitors']].to_csv('submission_1_25.csv', index=False)
 
 # report
 # [2800]	training's rmse: 0.444737	valid_1's rmse: 0.482011
@@ -253,3 +287,9 @@ sub_merge[['id', 'visitors']].to_csv('submission.csv', index=False)
 # Early stopping, best iteration is:
 # [3008]	training's rmse: 0.442593	valid_1's rmse: 0.481846
 # [LightGBM] [Info] Finished loading 3008 models
+
+# RMSE train:  0.444704666105
+# RMSE validate:  0.485510708879
+# Train RMSE mean:  0.443368844842
+# Valid RMSE mean:  0.481681036728
+# Validate RMSE:  0.48886187901
