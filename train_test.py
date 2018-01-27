@@ -11,7 +11,7 @@ del store_with_no_visit_rate
 
 air_store_info = pd.read_csv('processed/air_store_info.csv')
 air_store_info.drop('hpg_store_id', axis=1, inplace=True)
-data = pd.merge(data, air_store_info, on='air_store_id', how='left')
+data = pd.merge(data, air_store_info, on=['air_store_id', 'day_of_week'], how='left')
 del air_store_info
 
 air_reserve = pd.read_csv('processed/air_reserve_info.csv')
@@ -22,27 +22,27 @@ holiday = pd.read_csv('processed/holiday_info.csv')
 holiday.drop('day_of_week', axis=1, inplace=True)
 data = pd.merge(data, holiday, on='visit_date', how='left')
 
-total_sum = data.groupby(['air_store_id'], as_index=False).sum().rename(columns={'visitors': 'total_visitors'})
-data = pd.merge(data, total_sum[['air_store_id', 'total_visitors']], on='air_store_id', how='left')
-del total_sum
-
-visitors_groupby_week = data.groupby(['air_store_id', 'day_of_week'], as_index=False).sum().rename(columns={'visitors': 'week_visitors'})
-data = pd.merge(data, visitors_groupby_week[['air_store_id', 'week_visitors']], on='air_store_id', how='left')
-
-del visitors_groupby_week
-visitors_groupby_holi = data.groupby(['air_store_id', 'holiday_flg'], as_index=False).sum().rename(columns={'visitors': 'holi_visitors'})
-data = pd.merge(data, visitors_groupby_holi[['air_store_id', 'holi_visitors']], on='air_store_id', how='left')
-del visitors_groupby_holi
-data['week_visitors_rate'] = data.apply(lambda x: x['week_visitors'] / x['total_visitors'], axis=1)
-data['holi_visitors_rate'] = data.apply(lambda x: x['holi_visitors'] / x['total_visitors'], axis=1)
-
-data.drop(['total_visitors', 'week_visitors', 'holi_visitors'], axis=1, inplace=True)
+# total_sum = data.groupby(['air_store_id'], as_index=False).sum().rename(columns={'visitors': 'total_visitors'})
+# data = pd.merge(data, total_sum[['air_store_id', 'total_visitors']], on='air_store_id', how='left')
+# del total_sum
+#
+# visitors_groupby_week = data.groupby(['air_store_id', 'day_of_week'], as_index=False).sum().rename(columns={'visitors': 'week_visitors'})
+# data = pd.merge(data, visitors_groupby_week[['air_store_id', 'week_visitors']], on='air_store_id', how='left')
+#
+# del visitors_groupby_week
+# visitors_groupby_holi = data.groupby(['air_store_id', 'holiday_flg'], as_index=False).sum().rename(columns={'visitors': 'holi_visitors'})
+# data = pd.merge(data, visitors_groupby_holi[['air_store_id', 'holi_visitors']], on='air_store_id', how='left')
+# del visitors_groupby_holi
+# data['week_visitors_rate'] = data['week_visitors'] / data['total_visitors']
+# data['holi_visitors_rate'] = data['holi_visitors'] / data['total_visitors']
+#
+# data.drop(['total_visitors', 'week_visitors', 'holi_visitors'], axis=1, inplace=True)
 
 
 del holiday
 
 # there just fillna with zero
-data = data.fillna(0)
+data = data.fillna(-1)
 
 train = data[data['set'] == 0]
 test = data[data['set'] == 1]
@@ -51,7 +51,8 @@ train.drop('set', axis=1, inplace=True)
 test.drop('set', axis=1, inplace=True)
 
 cols = [x for x in train.columns if x not in ['air_store_id', 'visitors', 'visit_date', 'start_date']]
-
+train[['air_store_id'] + cols].head(100).to_csv('processed/train_lgb_1.csv', index=None)
+print(cols)
 X_train = train[cols].values
 y = np.log1p(train['visitors'].values)
 X_test = test[cols].values
